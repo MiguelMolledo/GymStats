@@ -1,5 +1,6 @@
 import { GlowBackground } from "@/components/GlowBackground";
 import { BottomNav, type NavExtraView } from "@/components/BottomNav";
+import { ViewTransition } from "@/components/ViewTransition";
 import { createClient } from "@/lib/supabase/server";
 import { getPlugin } from "@/plugins/registry";
 
@@ -44,7 +45,9 @@ export default async function AppLayout({
     <>
       <GlowBackground />
       <div className="mx-auto flex min-h-dvh w-full max-w-[480px] flex-col">
-        <div className="flex-1 pb-28">{children}</div>
+        <div className="flex-1 pb-28">
+          <ViewTransition>{children}</ViewTransition>
+        </div>
       </div>
       <BottomNav extraViews={extraViews} />
     </>

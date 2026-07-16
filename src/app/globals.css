@@ -29,3 +29,43 @@ html,
 body {
   background: var(--background);
 }
+
+/* --- Transiciones de entrada de vistas ------------------------------------
+   Fade + slide-up sutil para las vistas principales. CSS puro (sin framer-
+   motion: pesa demasiado para el beneficio en una PWA mobile-first). */
+@keyframes view-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-view-enter {
+  animation: view-enter 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Pulso suave para skeletons (más discreto que el pulse por defecto). */
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+.animate-skeleton {
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-view-enter,
+  .animate-skeleton {
+    animation: none;
+  }
+}
