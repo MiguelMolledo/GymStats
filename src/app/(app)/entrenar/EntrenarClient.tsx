@@ -7,9 +7,6 @@ import { createClient } from "@/lib/supabase/client";
 import type { PreviousSet } from "@/features/active-session/logic";
 import { useSessionStore } from "@/features/active-session/store";
 import { getSyncEngine } from "@/features/active-session/sync";
-import { getDB } from "@/features/active-session/db";
-import { getPlugin } from "@/plugins/registry";
-import type { CompletedSet } from "@/plugins/types";
 
 import { BlockSelector } from "./BlockSelector";
 import { SessionForm } from "./SessionForm";
@@ -58,10 +55,10 @@ export function EntrenarClient({ data }: { data: EntrenarData }) {
   const hydrate = useSessionStore((s) => s.hydrate);
   const startSession = useSessionStore((s) => s.startSession);
   const completeSession = useSessionStore((s) => s.completeSession);
-  const clearLocal = useSessionStore((s) => s.clearLocal);
+  const resetMemory = useSessionStore((s) => s.resetMemory);
   const [finishing, setFinishing] = useState(false);
 
-  // Hidrata la sesión activa local al montar.
+  // Hidrata la sesión activa local al montar (y arranca el sync pendiente).
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
@@ -83,6 +80,7 @@ export function EntrenarClient({ data }: { data: EntrenarData }) {
       userId: data.userId,
       templateId: data.template.id,
       blockId: block.id,
+      pluginKey: data.template.plugin_key,
       performedOn: today(),
       exercises: exercises.map((e) => ({
         id: e.id,
@@ -99,104 +97,26 @@ export function EntrenarClient({ data }: { data: EntrenarData }) {
     const current = useSessionStore.getState().session;
     if (!current || finishing) return;
     setFinishing(true);
-    const engine = getSyncEngine();
-    engine.init(createClient());
 
-    // 1) Marca completed localmente.
+    // 1) Marca completed en Dexie (+ hook del plugin pendiente).
     await completeSession();
 
-    // 2) Intenta volcar todo a remoto.
-    const online =
-      typeof navigator === "undefined" || navigator.onLine !== false;
-    let plainCompleted = false;
-
-    if (online) {
-      try {
-        await engine.flush();
-        plainCompleted = true;
-      } catch {
-        plainCompleted = false;
-      }
+    // 2) Intenta volcar TODO ya: push de sesión+sets, hook del plugin y
+    //    limpieza local, todo dentro del motor de sync. Si estamos offline o
+    //    falla, los datos quedan intactos en Dexie y el motor (backoff +
+    //    listener `online` + hidrataciones) lo reintentará.
+    const engine = getSyncEngine();
+    engine.init(createClient());
+    try {
+      await engine.flush();
+    } catch {
+      // el motor sigue reintentando en segundo plano.
     }
 
-    // 3) Si estamos online y todo se subió, ejecuta el hook del plugin.
-    if (plainCompleted) {
-      await runPluginHook(current.block_id);
-    } else {
-      // Offline (o fallo): deja pendiente el hook para ejecutarlo al reconectar.
-      await getDB().localSessions.update(current.id, {
-        pendingCompletedHook: 1,
-      });
-    }
-
-    // 4) Limpia el estado local y vuelve a Inicio.
-    await clearLocal();
+    // 3) Limpia SOLO la memoria (nunca Dexie) y vuelve a Inicio.
+    resetMemory();
     router.replace("/");
     router.refresh();
-  }
-
-  async function runPluginHook(blockId: string) {
-    const plugin = getPlugin(data.template.plugin_key);
-    if (!plugin?.onSessionCompleted) return;
-    const state = useSessionStore.getState();
-    const sess = state.session;
-    if (!sess) return;
-    const supabase = createClient();
-    const parsed = plugin.parseConfig(data.template.config);
-
-    const exerciseInfo = new Map(
-      data.exercises.map((e) => [e.id, e]),
-    );
-    const finalSets: CompletedSet[] = state.sets
-      .filter((s) => s.weight.trim() !== "" || s.reps.trim() !== "" || s.notes.trim() !== "")
-      .map((s) => ({
-        exercise_id: s.exercise_id,
-        set_number: s.set_number,
-        weight: s.weight.trim() === "" ? null : Number(s.weight.replace(",", ".")),
-        reps: s.reps.trim() === "" ? null : Math.trunc(Number(s.reps)),
-        notes: s.notes.trim(),
-        is_core: exerciseInfo.get(s.exercise_id)?.is_core ?? false,
-      }));
-
-    try {
-      await plugin.onSessionCompleted({
-        supabase,
-        session: {
-          id: sess.id,
-          user_id: sess.user_id,
-          template_id: sess.template_id,
-          block_id: blockId,
-          performed_on: sess.performed_on,
-        },
-        sets: finalSets,
-        config: parsed,
-        template: {
-          id: data.template.id,
-          config: data.template.config as never,
-          plugin_key: data.template.plugin_key,
-        },
-        blocks: data.blocks.map((b) => ({
-          id: b.id,
-          slug: b.slug,
-          label: b.label,
-          emoji: b.emoji,
-          accent_color: b.accent_color,
-          position: b.position,
-          template_id: data.template.id,
-        })),
-        exercises: data.exercises.map((e) => ({
-          id: e.id,
-          block_id: e.block_id,
-          name: e.name,
-          target_sets: e.target_sets,
-          is_core: e.is_core,
-          position: e.position,
-          archived: false,
-        })),
-      });
-    } catch {
-      // best-effort; el ciclo se recalculará en Fase 3 si algo falla.
-    }
   }
 
   if (!hydrated) {
@@ -207,7 +127,15 @@ export function EntrenarClient({ data }: { data: EntrenarData }) {
     );
   }
 
-  if (!session) {
+  if (finishing) {
+    return (
+      <div className="px-5 py-10 text-center text-sm text-white/40">
+        Guardando entrenamiento…
+      </div>
+    );
+  }
+
+  if (!session || session.status !== "active") {
     return (
       <BlockSelector
         blocks={data.blocks}

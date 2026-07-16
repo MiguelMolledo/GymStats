@@ -2,21 +2,27 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Dumbbell } from "lucide-react";
+import { CloudUpload, Dumbbell } from "lucide-react";
 
 import { createClient } from "@/lib/supabase/client";
-import { getDB } from "@/features/active-session/db";
+import { getDB, type LocalSession } from "@/features/active-session/db";
+import { discardLocalSession } from "@/features/active-session/discard";
 import { getSyncEngine } from "@/features/active-session/sync";
 
 type BannerData = {
   blockLabel: string;
   emoji: string | null;
-  /** origen: si solo existe remota, hay que bajarla a local al continuar. */
+  /** origen: si solo existe remota, /entrenar la rehidratará. */
   source: "local" | "remote";
+  localSessionId?: string;
   remoteSessionId?: string;
 };
 
-/** Nombre del bloque a partir del id (una query ligera). */
+/**
+ * Banner de Inicio: sesión activa (local gana sobre remota) con
+ * Continuar/Descartar, y aviso discreto si hay un entreno terminado
+ * pendiente de sincronizar.
+ */
 export function InProgressBanner({
   blocks,
 }: {
@@ -24,6 +30,7 @@ export function InProgressBanner({
 }) {
   const router = useRouter();
   const [data, setData] = useState<BannerData | null>(null);
+  const [pendingSync, setPendingSync] = useState(false);
   const [checked, setChecked] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -32,47 +39,62 @@ export function InProgressBanner({
     async function check() {
       const blockOf = (id: string) => blocks.find((b) => b.id === id) ?? null;
 
-      // 1) Local gana.
-      let local = null as Awaited<
-        ReturnType<typeof getLocalActive>
-      >;
+      let localSessions: LocalSession[] = [];
       try {
-        local = await getLocalActive();
+        localSessions = await getDB().localSessions.toArray();
       } catch {
-        local = null;
+        localSessions = [];
       }
-      if (local) {
-        const b = blockOf(local.block_id);
-        if (!cancelled) {
-          setData({
-            blockLabel: b?.label ?? "Sesión",
-            emoji: b?.emoji ?? null,
-            source: "local",
-          });
-          setChecked(true);
-        }
+
+      const localActive = localSessions.find((s) => s.status === "active");
+      const localPending = localSessions.some((s) => s.status !== "active");
+
+      // Cualquier trabajo local pendiente: arranca el motor de sync
+      // (incluye ejecutar hooks de cierre pendientes al reconectar).
+      if (localSessions.length > 0) {
+        const engine = getSyncEngine();
+        engine.init(createClient());
+        engine.schedule();
+      }
+
+      if (cancelled) return;
+      setPendingSync(!localActive && localPending);
+
+      // 1) La sesión LOCAL activa gana.
+      if (localActive) {
+        const b = blockOf(localActive.block_id);
+        setData({
+          blockLabel: b?.label ?? "Sesión",
+          emoji: b?.emoji ?? null,
+          source: "local",
+          localSessionId: localActive.id,
+        });
+        setChecked(true);
         return;
       }
 
-      // 2) Remota.
-      try {
-        const supabase = createClient();
-        const { data: remote } = await supabase
-          .from("workout_sessions")
-          .select("id, block_id")
-          .eq("status", "active")
-          .maybeSingle();
-        if (remote && !cancelled) {
-          const b = blockOf(remote.block_id);
-          setData({
-            blockLabel: b?.label ?? "Sesión",
-            emoji: b?.emoji ?? null,
-            source: "remote",
-            remoteSessionId: remote.id,
-          });
+      // 2) Remota, solo si NO hay nada local (si hay pendientes locales, el
+      //    estado remoto puede estar desactualizado hasta que se vuelquen).
+      if (localSessions.length === 0) {
+        try {
+          const supabase = createClient();
+          const { data: remote } = await supabase
+            .from("workout_sessions")
+            .select("id, block_id")
+            .eq("status", "active")
+            .maybeSingle();
+          if (remote && !cancelled) {
+            const b = blockOf(remote.block_id);
+            setData({
+              blockLabel: b?.label ?? "Sesión",
+              emoji: b?.emoji ?? null,
+              source: "remote",
+              remoteSessionId: remote.id,
+            });
+          }
+        } catch {
+          // sin red: no hay banner remoto.
         }
-      } catch {
-        // sin red: no hay banner remoto.
       }
       if (!cancelled) setChecked(true);
     }
@@ -91,27 +113,8 @@ export function InProgressBanner({
     if (!window.confirm("¿Descartar el entrenamiento en curso?")) return;
     setBusy(true);
     try {
-      if (data.source === "local") {
-        const db = getDB();
-        const active = await getLocalActive();
-        if (active) {
-          const supabase = createClient();
-          if (active.syncedInsert === 1) {
-            try {
-              await supabase
-                .from("workout_sessions")
-                .update({ status: "discarded" })
-                .eq("id", active.id);
-            } catch {
-              /* best-effort */
-            }
-          }
-          await db.transaction("rw", db.localSessions, db.localSets, async () => {
-            await db.localSets.where("session_id").equals(active.id).delete();
-            await db.localSessions.delete(active.id);
-          });
-        }
-        getSyncEngine().reset();
+      if (data.source === "local" && data.localSessionId) {
+        await discardLocalSession(data.localSessionId);
       } else if (data.remoteSessionId) {
         const supabase = createClient();
         await supabase
@@ -126,12 +129,26 @@ export function InProgressBanner({
     }
   }
 
-  if (!checked || !data) return null;
+  if (!checked) return null;
+
+  if (!data) {
+    if (!pendingSync) return null;
+    return (
+      <div className="mx-5 mt-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-2.5">
+        <CloudUpload className="h-4 w-4 shrink-0 text-white/40" />
+        <p className="text-xs text-white/50">
+          Sincronizando entreno pendiente…
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-5 mt-4 rounded-3xl border border-indigo-400/30 bg-indigo-500/10 p-4">
       <div className="flex items-center gap-2">
-        <span className="text-lg">{data.emoji ?? <Dumbbell className="h-4 w-4" />}</span>
+        <span className="text-lg">
+          {data.emoji ?? <Dumbbell className="h-4 w-4" />}
+        </span>
         <div className="min-w-0">
           <p className="text-sm font-semibold text-white">
             Entrenamiento en curso
@@ -158,10 +175,4 @@ export function InProgressBanner({
       </div>
     </div>
   );
-}
-
-async function getLocalActive() {
-  const db = getDB();
-  const session = await db.localSessions.where("status").equals("active").first();
-  return session ?? null;
 }
