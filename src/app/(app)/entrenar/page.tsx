@@ -2,7 +2,7 @@ import { Header } from "@/components/Header";
 import { createClient } from "@/lib/supabase/server";
 
 import { EntrenarClient, type EntrenarData } from "./EntrenarClient";
-import { NoTemplate } from "./NoTemplate";
+import { EmptyTemplate, NoTemplate } from "./NoTemplate";
 
 export default async function EntrenarPage({
   searchParams,
@@ -63,6 +63,15 @@ export default async function EntrenarPage({
       <>
         <Header title="Entrenar" subtitle="Empieza una sesión" />
         <NoTemplate />
+      </>
+    );
+  }
+
+  if (blocks.length === 0) {
+    return (
+      <>
+        <Header title="Entrenar" subtitle="Empieza una sesión" />
+        <EmptyTemplate templateId={templateId} />
       </>
     );
   }
