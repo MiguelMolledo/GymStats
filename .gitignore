@@ -17,6 +17,12 @@
 /.next/
 /out/
 
+# serwist / pwa (service worker generado en build)
+/public/sw.js
+/public/sw.js.map
+/public/swe-worker-*.js
+/public/workbox-*.js
+
 # production
 /build
 

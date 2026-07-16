@@ -63,8 +63,9 @@ export const config = {
      * Aplica a todas las rutas excepto:
      * - _next/static (ficheros estáticos)
      * - _next/image (optimización de imágenes)
+     * - assets de PWA: manifest, service worker (sw.js / swe-worker / workbox)
      * - favicon.ico y ficheros de assets comunes
      */
-    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
+    "/((?!_next/static|_next/image|manifest.webmanifest|sw.js|swe-worker.*\\.js|workbox-.*\\.js|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };
