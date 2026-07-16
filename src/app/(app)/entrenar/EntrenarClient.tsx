@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/client";
@@ -48,7 +48,13 @@ function today(): string {
   return new Date(d.getTime() - tz * 60000).toISOString().slice(0, 10);
 }
 
-export function EntrenarClient({ data }: { data: EntrenarData }) {
+export function EntrenarClient({
+  data,
+  preselectSlug = null,
+}: {
+  data: EntrenarData;
+  preselectSlug?: string | null;
+}) {
   const router = useRouter();
   const hydrated = useSessionStore((s) => s.hydrated);
   const session = useSessionStore((s) => s.session);
@@ -57,6 +63,7 @@ export function EntrenarClient({ data }: { data: EntrenarData }) {
   const completeSession = useSessionStore((s) => s.completeSession);
   const resetMemory = useSessionStore((s) => s.resetMemory);
   const [finishing, setFinishing] = useState(false);
+  const preselectHandled = useRef(false);
 
   // Hidrata la sesión activa local al montar (y arranca el sync pendiente).
   useEffect(() => {
@@ -92,6 +99,25 @@ export function EntrenarClient({ data }: { data: EntrenarData }) {
       previousSets: data.prefillByBlock[block.id] ?? [],
     });
   }
+
+  // Preselección de bloque desde el Dashboard (?bloque=slug): solo si ya
+  // hidratamos y NO hay sesión activa; se aplica una única vez.
+  useEffect(() => {
+    if (!hydrated || preselectHandled.current || !preselectSlug) return;
+    const current = useSessionStore.getState().session;
+    if (current && current.status === "active") {
+      preselectHandled.current = true;
+      return;
+    }
+    const block = data.blocks.find((b) => b.slug === preselectSlug);
+    if (!block) {
+      preselectHandled.current = true;
+      return;
+    }
+    preselectHandled.current = true;
+    void handleSelectBlock(block);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, preselectSlug]);
 
   async function handleFinish() {
     const current = useSessionStore.getState().session;

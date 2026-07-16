@@ -4,7 +4,12 @@ import { createClient } from "@/lib/supabase/server";
 import { EntrenarClient, type EntrenarData } from "./EntrenarClient";
 import { NoTemplate } from "./NoTemplate";
 
-export default async function EntrenarPage() {
+export default async function EntrenarPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ bloque?: string }>;
+}) {
+  const { bloque } = await searchParams;
   const supabase = await createClient();
   const {
     data: { user },
@@ -135,7 +140,7 @@ export default async function EntrenarPage() {
   return (
     <>
       <Header title="Entrenar" subtitle="Empieza una sesión" />
-      <EntrenarClient data={data} />
+      <EntrenarClient data={data} preselectSlug={bloque ?? null} />
     </>
   );
 }
