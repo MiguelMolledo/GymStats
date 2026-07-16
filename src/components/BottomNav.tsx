@@ -2,8 +2,28 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Home, Dumbbell, History, LayoutList } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import {
+  Home,
+  Dumbbell,
+  History,
+  LayoutList,
+  Repeat,
+  type LucideIcon,
+} from "lucide-react";
+
+/** Iconos disponibles para las ExtraViews de plugins (por nombre serializable). */
+const EXTRA_ICONS: Record<string, LucideIcon> = {
+  Repeat,
+  LayoutList,
+  History,
+};
+
+/** ExtraView serializable que el layout inyecta desde el plugin activo. */
+export type NavExtraView = {
+  slug: string;
+  label: string;
+  icon: string;
+};
 
 type NavItem = {
   href: string;
@@ -11,16 +31,25 @@ type NavItem = {
   icon: LucideIcon;
 };
 
-const items: NavItem[] = [
-  { href: "/", label: "Inicio", icon: Home },
-  { href: "/entrenar", label: "Entrenar", icon: Dumbbell },
-  { href: "/historial", label: "Historial", icon: History },
-  { href: "/plantillas", label: "Plantillas", icon: LayoutList },
-];
-
-/** Barra de navegación flotante, redondeada y con blur, fija abajo. */
-export function BottomNav() {
+/**
+ * Barra de navegación flotante, redondeada y con blur, fija abajo. Los items
+ * base son fijos; entre Entrenar e Historial se insertan las ExtraViews del
+ * plugin activo (→ /v/{slug}).
+ */
+export function BottomNav({ extraViews = [] }: { extraViews?: NavExtraView[] }) {
   const pathname = usePathname();
+
+  const items: NavItem[] = [
+    { href: "/", label: "Inicio", icon: Home },
+    { href: "/entrenar", label: "Entrenar", icon: Dumbbell },
+    ...extraViews.map((v) => ({
+      href: `/v/${v.slug}`,
+      label: v.label,
+      icon: EXTRA_ICONS[v.icon] ?? Repeat,
+    })),
+    { href: "/historial", label: "Historial", icon: History },
+    { href: "/plantillas", label: "Plantillas", icon: LayoutList },
+  ];
 
   return (
     <nav className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
@@ -40,7 +69,7 @@ export function BottomNav() {
               }`}
             >
               <Icon className="h-5 w-5" />
-              <span>{label}</span>
+              <span className="truncate">{label}</span>
             </Link>
           );
         })}
