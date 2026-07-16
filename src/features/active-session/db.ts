@@ -2,22 +2,28 @@ import Dexie, { type EntityTable } from "dexie";
 
 import type { LocalSet } from "./logic";
 
-/** La sesión activa local. Solo puede haber una a la vez. */
+/**
+ * Sesión local. Solo puede haber una `active` a la vez, pero pueden quedar
+ * sesiones `completed`/`discarded` pendientes de volcar a Supabase (offline).
+ */
 export type LocalSession = {
   id: string;
   user_id: string;
   template_id: string;
   block_id: string;
+  /** plugin del template, para ejecutar el hook de cierre sin refetch previo. */
+  plugin_key: string;
   performed_on: string; // YYYY-MM-DD
   notes: string;
   started_at: string; // ISO
+  completed_at: string | null; // ISO
   status: "active" | "completed" | "discarded";
   /** 1 si la fila de sesión tiene cambios sin sincronizar. */
   dirty: 0 | 1;
   /** 1 si la sesión existe en Supabase (insertada). */
   syncedInsert: 0 | 1;
   /**
-   * Pendiente de ejecutar plugin.onSessionCompleted tras completar offline.
+   * Pendiente de ejecutar plugin.onSessionCompleted tras completarla.
    * 1 = pendiente. Se limpia cuando el hook corre con éxito.
    */
   pendingCompletedHook: 0 | 1;

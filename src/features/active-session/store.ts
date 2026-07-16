@@ -5,6 +5,7 @@ import { create } from "zustand";
 import { createClient } from "@/lib/supabase/client";
 
 import { getDB, type LocalSession, type LocalSet } from "./db";
+import { discardLocalSession } from "./discard";
 import { prefillWeight, type PreviousSet } from "./logic";
 import { getSyncEngine } from "./sync";
 
@@ -22,6 +23,7 @@ export type StartSessionInput = {
   userId: string;
   templateId: string;
   blockId: string;
+  pluginKey: string;
   performedOn: string; // YYYY-MM-DD
   exercises: BlockExercise[];
   /** Sets de la última sesión completada del mismo bloque (prefill). */
@@ -45,7 +47,8 @@ type StoreState = {
   ) => Promise<void>;
   completeSession: () => Promise<void>;
   discardSession: () => Promise<void>;
-  clearLocal: () => Promise<void>;
+  /** Limpia SOLO el estado en memoria. Los datos locales quedan en Dexie. */
+  resetMemory: () => void;
 };
 
 function nowISO() {
@@ -59,10 +62,19 @@ export const useSessionStore = create<StoreState>((set, get) => ({
 
   async hydrate() {
     const db = getDB();
-    const session = await db.localSessions
-      .where("status")
-      .equals("active")
-      .first();
+    const all = await db.localSessions.toArray();
+
+    // Si hay CUALQUIER trabajo local pendiente (activa, completed-pendiente,
+    // discarded-pendiente), arranca el motor para que lo vuelque.
+    if (all.length > 0) {
+      const engine = getSyncEngine();
+      engine.init(createClient());
+      engine.schedule();
+    }
+
+    // Solo la sesión ACTIVE abre el formulario. Una completed-pendiente NO es
+    // "entrenamiento en curso": solo está esperando sincronizarse.
+    const session = all.find((s) => s.status === "active") ?? null;
     if (!session) {
       set({ hydrated: true, session: null, sets: [] });
       return;
@@ -76,25 +88,25 @@ export const useSessionStore = create<StoreState>((set, get) => ({
         ? a.set_number - b.set_number
         : a.exercise_id.localeCompare(b.exercise_id),
     );
-    // Arranca el motor de sync y reintenta lo pendiente.
-    const engine = getSyncEngine();
-    engine.init(createClient());
-    engine.schedule();
     set({ hydrated: true, session, sets });
   },
 
   async startSession(input) {
     const db = getDB();
-    // Solo una sesión activa local: descarta cualquier resto previo.
-    await db.localSessions.where("status").equals("active").delete();
-    // (Los sets huérfanos se limpian aparte para no dejar basura.)
-    const stale = await db.localSessions.toArray();
-    const staleIds = new Set(stale.map((s) => s.id));
-    const allSets = await db.localSets.toArray();
-    const orphan = allSets
-      .filter((s) => !staleIds.has(s.session_id))
-      .map((s) => s.id);
-    if (orphan.length) await db.localSets.bulkDelete(orphan);
+    // Solo una sesión activa local: elimina restos 'active' (nunca las
+    // completed/discarded pendientes de sync, que aún tienen trabajo).
+    const staleActive = await db.localSessions
+      .where("status")
+      .equals("active")
+      .toArray();
+    if (staleActive.length > 0) {
+      await db.transaction("rw", db.localSessions, db.localSets, async () => {
+        for (const s of staleActive) {
+          await db.localSets.where("session_id").equals(s.id).delete();
+          await db.localSessions.delete(s.id);
+        }
+      });
+    }
 
     const sessionId = crypto.randomUUID();
     const startedAt = nowISO();
@@ -103,9 +115,11 @@ export const useSessionStore = create<StoreState>((set, get) => ({
       user_id: input.userId,
       template_id: input.templateId,
       block_id: input.blockId,
+      plugin_key: input.pluginKey,
       performed_on: input.performedOn,
       notes: "",
       started_at: startedAt,
+      completed_at: null,
       status: "active",
       dirty: 1,
       syncedInsert: 0,
@@ -144,15 +158,18 @@ export const useSessionStore = create<StoreState>((set, get) => ({
     const engine = getSyncEngine();
     engine.init(createClient());
     set({ hydrated: true, session, sets });
-    // Inserta la sesión en remoto en cuanto haya red (debounce corto no,
-    // queremos que exista pronto: schedule normal, se inserta al primer ciclo).
+    // Inserta la sesión en remoto en cuanto haya red.
     engine.schedule();
   },
 
   async updateSetField(setId, field, value) {
     const db = getDB();
     const updated = nowISO();
-    await db.localSets.update(setId, { [field]: value, dirty: 1, updated_at: updated });
+    await db.localSets.update(setId, {
+      [field]: value,
+      dirty: 1,
+      updated_at: updated,
+    });
     set((state) => ({
       sets: state.sets.map((s) =>
         s.id === setId
@@ -176,50 +193,26 @@ export const useSessionStore = create<StoreState>((set, get) => ({
     const { session } = get();
     if (!session) return;
     const db = getDB();
-    // Marca completed localmente y dirty para que el push la propague.
-    await db.localSessions.update(session.id, {
+    // Marca completed + hook pendiente. El motor de sync empuja el estado y,
+    // cuando todo está limpio, ejecuta el hook del plugin y borra el local.
+    const patch = {
       status: "completed",
       dirty: 1,
-    });
-    set({ session: { ...session, status: "completed", dirty: 1 } });
+      completed_at: nowISO(),
+      pendingCompletedHook: 1,
+    } as const;
+    await db.localSessions.update(session.id, patch);
+    set({ session: { ...session, ...patch } });
   },
 
   async discardSession() {
     const { session } = get();
     if (!session) return;
-    const db = getDB();
-    const engine = getSyncEngine();
-    // Si existe en remoto, márcala discarded allí (best-effort).
-    if (session.syncedInsert === 1) {
-      try {
-        const supabase = createClient();
-        await supabase
-          .from("workout_sessions")
-          .update({ status: "discarded" })
-          .eq("id", session.id);
-      } catch {
-        // best-effort: si falla, la sesión remota queda active pero el banner
-        // de Inicio permite volver a descartarla.
-      }
-    }
-    await db.transaction("rw", db.localSessions, db.localSets, async () => {
-      await db.localSets.where("session_id").equals(session.id).delete();
-      await db.localSessions.delete(session.id);
-    });
-    engine.reset();
+    await discardLocalSession(session.id);
     set({ session: null, sets: [] });
   },
 
-  async clearLocal() {
-    const { session } = get();
-    const db = getDB();
-    if (session) {
-      await db.transaction("rw", db.localSessions, db.localSets, async () => {
-        await db.localSets.where("session_id").equals(session.id).delete();
-        await db.localSessions.delete(session.id);
-      });
-    }
-    getSyncEngine().reset();
+  resetMemory() {
     set({ session: null, sets: [] });
   },
 }));

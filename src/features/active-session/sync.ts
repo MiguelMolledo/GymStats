@@ -2,8 +2,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
 
-import { getDB, type LocalSession } from "./db";
-import { selectSetsToSync, type LocalSet } from "./logic";
+import { runCompletedSessionHook } from "./completed-hook";
+import { getDB } from "./db";
+import {
+  isAllClean,
+  pushAll,
+  runPendingHooks,
+  type EngineRemote,
+  type EngineStorage,
+} from "./engine-core";
 
 type Client = SupabaseClient<Database>;
 
@@ -15,33 +22,95 @@ const DEBOUNCE_MS = 2000;
 const MAX_BACKOFF_MS = 30000;
 const BASE_BACKOFF_MS = 1000;
 
+/** Adaptador Dexie del storage del motor. */
+function createDexieStorage(): EngineStorage {
+  return {
+    async getPendingSessions() {
+      return getDB().localSessions.toArray();
+    },
+    async getDirtySets(sessionId) {
+      return getDB()
+        .localSets.where({ session_id: sessionId, dirty: 1 })
+        .toArray();
+    },
+    async getSets(sessionId) {
+      return getDB().localSets.where("session_id").equals(sessionId).toArray();
+    },
+    async markSessionPushed(sessionId) {
+      await getDB().localSessions.update(sessionId, {
+        syncedInsert: 1,
+        dirty: 0,
+      });
+    },
+    async markSetsClean(setIds) {
+      const db = getDB();
+      await db.transaction("rw", db.localSets, async () => {
+        for (const id of setIds) {
+          await db.localSets.update(id, { dirty: 0 });
+        }
+      });
+    },
+    async clearPendingHook(sessionId) {
+      await getDB().localSessions.update(sessionId, {
+        pendingCompletedHook: 0,
+      });
+    },
+    async deleteSessionAndSets(sessionId) {
+      const db = getDB();
+      await db.transaction("rw", db.localSessions, db.localSets, async () => {
+        await db.localSets.where("session_id").equals(sessionId).delete();
+        await db.localSessions.delete(sessionId);
+      });
+    },
+  };
+}
+
+/** Adaptador Supabase del remoto del motor. */
+export function createSupabaseRemote(supabase: Client): EngineRemote {
+  return {
+    async upsertSession(payload) {
+      const { error } = await supabase
+        .from("workout_sessions")
+        .upsert(payload, { onConflict: "id" });
+      if (error) throw error;
+    },
+    async upsertSets(payload) {
+      const { error } = await supabase
+        .from("session_sets")
+        .upsert(payload, { onConflict: "id" });
+      if (error) throw error;
+    },
+  };
+}
+
 /**
  * Scheduler de sincronización local-first. Único por pestaña.
  * - schedule(): debounce ~2s tras el último cambio.
- * - flush(): fuerza envío inmediato y resuelve cuando todo está limpio.
- * - estado observable para el indicador de UI.
+ * - flush(): ciclo inmediato; resuelve true si todo quedó limpio.
+ * - tras cada push limpio ejecuta los hooks de cierre pendientes y borra de
+ *   local las sesiones terminadas.
+ * - reintentos con backoff exponencial y reintento al evento `online`.
  */
 class SyncEngine {
   private supabase: Client | null = null;
+  private storage: EngineStorage = createDexieStorage();
   private status: SyncStatus = "saved";
   private listeners = new Set<Listener>();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffTimer: ReturnType<typeof setTimeout> | null = null;
   private attempt = 0;
-  private running = false;
-  private rerunRequested = false;
-  private onlineHandler: (() => void) | null = null;
-  /** Promesas a resolver cuando el ciclo de sync deje todo limpio. */
-  private flushWaiters: Array<() => void> = [];
+  private onlineBound = false;
+  /** Serializa los ciclos de sync (nunca dos push simultáneos). */
+  private queue: Promise<unknown> = Promise.resolve();
 
   init(supabase: Client) {
     this.supabase = supabase;
-    if (typeof window !== "undefined" && !this.onlineHandler) {
-      this.onlineHandler = () => {
-        // Al reconectar, reintenta inmediatamente.
-        this.run();
-      };
-      window.addEventListener("online", this.onlineHandler);
+    if (typeof window !== "undefined" && !this.onlineBound) {
+      this.onlineBound = true;
+      window.addEventListener("online", () => {
+        // Al reconectar, reintenta inmediatamente (push + hooks pendientes).
+        void this.runCycle();
+      });
     }
   }
 
@@ -66,15 +135,16 @@ class SyncEngine {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = null;
-      this.run();
+      void this.runCycle();
     }, DEBOUNCE_MS);
   }
 
   /**
-   * Fuerza el envío inmediato y resuelve cuando no quede nada dirty.
-   * Se usa al terminar el entrenamiento.
+   * Fuerza un ciclo inmediato (push + hooks). Devuelve true si todo quedó
+   * limpio (volcado y hooks ejecutados); false si offline o fallo — en ese
+   * caso el backoff / listener `online` seguirá reintentando en segundo plano.
    */
-  async flush(): Promise<void> {
+  async flush(): Promise<boolean> {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
@@ -83,180 +153,73 @@ class SyncEngine {
       clearTimeout(this.backoffTimer);
       this.backoffTimer = null;
     }
-    if (await this.isClean()) {
-      this.setStatus("saved");
-      return;
+    return this.runCycle();
+  }
+
+  /** Encola un ciclo de sync serializado. */
+  private runCycle(): Promise<boolean> {
+    const next = this.queue.then(
+      () => this.doCycle(),
+      () => this.doCycle(),
+    );
+    this.queue = next.catch(() => false);
+    return next;
+  }
+
+  private async doCycle(): Promise<boolean> {
+    if (!this.supabase) return false;
+    const offline =
+      typeof navigator !== "undefined" && navigator.onLine === false;
+    if (offline) {
+      const clean = await isAllClean(this.storage);
+      this.setStatus(clean ? "saved" : "offline");
+      return clean;
     }
-    const promise = new Promise<void>((resolve) => {
-      this.flushWaiters.push(resolve);
-    });
-    this.run();
-    return promise;
-  }
-
-  private async isClean(): Promise<boolean> {
-    const db = getDB();
-    const session = await this.getActiveSession();
-    if (!session) return true;
-    // Sesión pendiente de insertar o dirty.
-    if (session.syncedInsert === 0 || session.dirty === 1) return false;
-    const dirtySets = await db.localSets
-      .where({ session_id: session.id, dirty: 1 })
-      .toArray();
-    // Solo cuentan los no vacíos (los vacíos nunca se envían).
-    const pending = selectSetsToSync(dirtySets);
-    return pending.length === 0;
-  }
-
-  private async getActiveSession(): Promise<LocalSession | undefined> {
-    const db = getDB();
-    return db.localSessions.where("status").equals("active").first();
-  }
-
-  private resolveFlushWaiters() {
-    const waiters = this.flushWaiters;
-    this.flushWaiters = [];
-    for (const w of waiters) w();
-  }
-
-  /** Ejecuta un ciclo de sincronización (con reentrada segura). */
-  private run() {
-    if (this.running) {
-      this.rerunRequested = true;
-      return;
-    }
-    void this.execute();
-  }
-
-  private async execute() {
-    if (!this.supabase) return;
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      this.setStatus("offline");
-      return;
-    }
-    this.running = true;
     this.setStatus("saving");
+    const remote = createSupabaseRemote(this.supabase);
     try {
-      const ok = await this.pushOnce();
-      this.running = false;
-      if (!ok) {
-        this.scheduleBackoff();
-        return;
-      }
-      this.attempt = 0;
-      if (this.rerunRequested) {
-        this.rerunRequested = false;
-        this.run();
-        return;
-      }
-      if (await this.isClean()) {
-        this.setStatus("saved");
-        this.resolveFlushWaiters();
-      } else {
-        // Algo quedó dirty (p.ej. cambios llegados durante el push): reintenta.
-        this.run();
-      }
+      await pushAll(this.storage, remote);
+      await runPendingHooks(this.storage, (session, sets) =>
+        runCompletedSessionHook(this.supabase!, session, sets),
+      );
     } catch {
-      this.running = false;
-      this.setStatus("error");
       this.scheduleBackoff();
+      return false;
     }
+    const clean = await isAllClean(this.storage);
+    if (clean) {
+      this.attempt = 0;
+      this.setStatus("saved");
+      return true;
+    }
+    // Quedó trabajo (p.ej. cambios llegados durante el push): otro ciclo.
+    this.schedule();
+    return false;
   }
 
   private scheduleBackoff() {
-    // Si estamos offline, no reintentes por timer: el evento `online` lo hará.
+    // Si nos quedamos offline, el evento `online` reintentará.
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
       this.setStatus("offline");
       return;
     }
     this.setStatus("error");
-    const delay = Math.min(
-      MAX_BACKOFF_MS,
-      BASE_BACKOFF_MS * 2 ** this.attempt,
-    );
+    const delay = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** this.attempt);
     this.attempt += 1;
     if (this.backoffTimer) clearTimeout(this.backoffTimer);
     this.backoffTimer = setTimeout(() => {
       this.backoffTimer = null;
-      this.run();
+      void this.runCycle();
     }, delay);
   }
 
-  /**
-   * Un intento de push: inserta/upserta la sesión y upserta los sets dirty.
-   * Devuelve true si todo fue bien.
-   */
-  private async pushOnce(): Promise<boolean> {
-    if (!this.supabase) return false;
-    const db = getDB();
-    const session = await this.getActiveSession();
-    if (!session) return true;
-
-    // 1) Upsert de la sesión (insert o cambios).
-    if (session.syncedInsert === 0 || session.dirty === 1) {
-      const { error } = await this.supabase.from("workout_sessions").upsert(
-        {
-          id: session.id,
-          user_id: session.user_id,
-          template_id: session.template_id,
-          block_id: session.block_id,
-          performed_on: session.performed_on,
-          notes: session.notes,
-          status: session.status,
-          started_at: session.started_at,
-        },
-        { onConflict: "id" },
-      );
-      if (error) throw error;
-      await db.localSessions.update(session.id, {
-        syncedInsert: 1,
-        dirty: 0,
-      });
-    }
-
-    // 2) Upsert batch de sets dirty no vacíos.
-    const dirtySets = await db.localSets
-      .where({ session_id: session.id, dirty: 1 })
-      .toArray();
-    const payload = selectSetsToSync(dirtySets);
-    if (payload.length > 0) {
-      const { error } = await this.supabase
-        .from("session_sets")
-        .upsert(payload, { onConflict: "id" });
-      if (error) throw error;
-    }
-    // Marca clean todos los dirty (incluidos los vacíos que no se envían:
-    // dejan de estar dirty hasta que el usuario vuelva a tocarlos).
-    const syncedIds = new Set(payload.map((p) => p.id));
-    const emptyIds = dirtySets
-      .filter((s) => !syncedIds.has(s.id))
-      .map((s) => s.id);
-    await db.transaction("rw", db.localSets, async () => {
-      for (const id of syncedIds) {
-        await db.localSets.update(id, { dirty: 0 });
-      }
-      for (const id of emptyIds) {
-        await db.localSets.update(id, { dirty: 0 });
-      }
-    });
-    return true;
-  }
-
-  /** Marca la sesión como dirty (para su próxima sincronización). */
-  async markSessionDirty(sessionId: string) {
-    await getDB().localSessions.update(sessionId, { dirty: 1 });
-  }
-
-  /** Limpia timers y estado (al descartar/terminar o desmontar). */
+  /** Limpia timers y estado del indicador. NO toca datos locales. */
   reset() {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     if (this.backoffTimer) clearTimeout(this.backoffTimer);
     this.debounceTimer = null;
     this.backoffTimer = null;
     this.attempt = 0;
-    this.running = false;
-    this.rerunRequested = false;
-    this.resolveFlushWaiters();
     this.setStatus("saved");
   }
 }
@@ -268,5 +231,3 @@ export function getSyncEngine(): SyncEngine {
   if (!_engine) _engine = new SyncEngine();
   return _engine;
 }
-
-export type { LocalSet };
