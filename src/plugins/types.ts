@@ -47,6 +47,35 @@ export type SessionCompletedContext = {
   exercises: ExerciseRow[];
 };
 
+/**
+ * Props que el shell inyecta al Dashboard del plugin en Inicio. El shell ya
+ * cargó `data` (serializable) según el tipo que el plugin define; aquí lo
+ * dejamos genérico para no acoplar el shell a un plugin concreto.
+ */
+export type DashboardProps = {
+  /** datos ya cargados por el server component de Inicio (serializables). */
+  data: unknown;
+};
+
+/** Props que el shell inyecta a una ExtraView del plugin. */
+export type ExtraViewProps = {
+  /** datos ya cargados por el server component de la ruta /v/[slug]. */
+  data: unknown;
+};
+
+/**
+ * Vista extra que un plugin añade a la navegación (aparece en la BottomNav
+ * y se sirve en /v/{slug}). `icon` es el nombre de un icono lucide (string
+ * serializable, no un componente) para poder pasarlo de server a client.
+ */
+export type PluginExtraView = {
+  slug: string;
+  label: string;
+  /** nombre de icono lucide-react (p. ej. "Repeat"). */
+  icon: string;
+  Component: ComponentType<ExtraViewProps>;
+};
+
 /** Props que el shell inyecta al widget SessionExtras del plugin. */
 export type SessionExtrasProps = {
   /** config ya parseada del template. */
@@ -67,6 +96,9 @@ export interface WorkoutPlugin {
   /** Hook al cerrar una sesión (crear/actualizar ciclos, etc.). */
   onSessionCompleted?(ctx: SessionCompletedContext): Promise<void>;
 
-  // Dashboard (Fase 3) — se añadirá aquí:
-  // Dashboard?: ComponentType<DashboardProps>;
+  /** Dashboard del plugin en Inicio (recibe datos ya cargados por el shell). */
+  Dashboard: ComponentType<DashboardProps>;
+
+  /** Vistas extra del plugin (BottomNav + ruta /v/{slug}). */
+  ExtraViews?: PluginExtraView[];
 }
