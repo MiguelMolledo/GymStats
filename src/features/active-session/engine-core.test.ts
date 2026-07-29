@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { LocalSession } from "./db";
 import {
+  ActiveSessionConflictError,
   isAllClean,
   orderForPush,
   pushAll,
@@ -59,14 +60,30 @@ class FakeRemote implements EngineRemote {
   offline = false;
   sessions = new Map<string, SessionUpsertPayload>();
   sets = new Map<string, RemoteSet>();
+  // Simulación del conflicto "una activa por usuario":
+  //  - "active": el upsert de una sesión active lanza conflicto.
+  //  - "any": lo lanza para cualquier estado (para el caso NO active).
+  throwConflictFor: "active" | "any" | null = null;
+  // Si true, discardOtherActiveSessions NO libera el conflicto → el retry falla.
+  failRetryAfterDiscard = false;
+  discardCalls: Array<{ userId: string; keepSessionId: string }> = [];
 
   async upsertSession(payload: SessionUpsertPayload) {
     if (this.offline) throw new Error("network down");
+    const conflicts =
+      this.throwConflictFor === "any" ||
+      (this.throwConflictFor === "active" && payload.status === "active");
+    if (conflicts) throw new ActiveSessionConflictError();
     this.sessions.set(payload.id, payload);
   }
   async upsertSets(payload: RemoteSet[]) {
     if (this.offline) throw new Error("network down");
     for (const s of payload) this.sets.set(s.id, s);
+  }
+  async discardOtherActiveSessions(userId: string, keepSessionId: string) {
+    this.discardCalls.push({ userId, keepSessionId });
+    // Libera la huérfana (salvo que el test fuerce un retry fallido).
+    if (!this.failRetryAfterDiscard) this.throwConflictFor = null;
   }
 }
 
@@ -278,6 +295,66 @@ describe("discarded sessions", () => {
     await runPendingHooks(storage, hook);
     expect(hook).not.toHaveBeenCalled();
     expect(storage.sessions.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Autorrecuperación del conflicto "una activa por usuario" (fila huérfana).
+// ---------------------------------------------------------------------------
+describe("active-session conflict self-heal", () => {
+  it("(a) discards other actives and the retry succeeds → session pushed", async () => {
+    const storage = new FakeStorage();
+    const remote = new FakeRemote();
+    remote.throwConflictFor = "active";
+    storage.sessions.set(
+      "sess1",
+      session({ status: "active", dirty: 1, syncedInsert: 0 }),
+    );
+
+    await pushAll(storage, remote);
+
+    // Se pidió descartar las otras activas (todas menos la nuestra).
+    expect(remote.discardCalls).toEqual([
+      { userId: "u1", keepSessionId: "sess1" },
+    ]);
+    // El retry triunfó y la sesión quedó en remoto + marcada como pushed.
+    expect(remote.sessions.get("sess1")?.status).toBe("active");
+    expect(storage.sessions.get("sess1")?.syncedInsert).toBe(1);
+    expect(storage.sessions.get("sess1")?.dirty).toBe(0);
+  });
+
+  it("(b) propagates if the retry after self-heal still conflicts", async () => {
+    const storage = new FakeStorage();
+    const remote = new FakeRemote();
+    remote.throwConflictFor = "active";
+    remote.failRetryAfterDiscard = true;
+    storage.sessions.set(
+      "sess1",
+      session({ status: "active", dirty: 1, syncedInsert: 0 }),
+    );
+
+    await expect(pushAll(storage, remote)).rejects.toBeInstanceOf(
+      ActiveSessionConflictError,
+    );
+    // Se intentó el self-heal una vez, pero la sesión NO se marca pushed.
+    expect(remote.discardCalls.length).toBe(1);
+    expect(storage.sessions.get("sess1")?.syncedInsert).toBe(0);
+  });
+
+  it("(c) propagates a conflict on a NON-active session without self-heal", async () => {
+    const storage = new FakeStorage();
+    const remote = new FakeRemote();
+    remote.throwConflictFor = "any";
+    storage.sessions.set(
+      "sess1",
+      session({ status: "completed", dirty: 1, syncedInsert: 0 }),
+    );
+
+    await expect(pushAll(storage, remote)).rejects.toBeInstanceOf(
+      ActiveSessionConflictError,
+    );
+    // Sin autorrecuperación para estados que no son 'active'.
+    expect(remote.discardCalls.length).toBe(0);
   });
 });
 

@@ -5,6 +5,7 @@ import type { Database } from "@/lib/supabase/database.types";
 import { runCompletedSessionHook } from "./completed-hook";
 import { getDB } from "./db";
 import {
+  ActiveSessionConflictError,
   isAllClean,
   pushAll,
   runPendingHooks,
@@ -72,12 +73,30 @@ export function createSupabaseRemote(supabase: Client): EngineRemote {
       const { error } = await supabase
         .from("workout_sessions")
         .upsert(payload, { onConflict: "id" });
-      if (error) throw error;
+      if (error) {
+        // 23505 = unique_violation: choque con el índice "una activa por
+        // usuario". Se marca para que el motor se autorrecupere.
+        if (error.code === "23505") {
+          throw new ActiveSessionConflictError(error.message);
+        }
+        throw error;
+      }
     },
     async upsertSets(payload) {
       const { error } = await supabase
         .from("session_sets")
         .upsert(payload, { onConflict: "id" });
+      if (error) throw error;
+    },
+    async discardOtherActiveSessions(userId, keepSessionId) {
+      // Descarta las demás activas del usuario (RLS ya limita al usuario; el
+      // .eq("user_id") lo deja explícito). Libera la huérfana antes del retry.
+      const { error } = await supabase
+        .from("workout_sessions")
+        .update({ status: "discarded" })
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .neq("id", keepSessionId);
       if (error) throw error;
     },
   };

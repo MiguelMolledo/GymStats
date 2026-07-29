@@ -33,9 +33,29 @@ export interface EngineStorage {
   deleteSessionAndSets(sessionId: string): Promise<void>;
 }
 
+/**
+ * El upsert de una sesión chocó con el índice único parcial
+ * "una activa por usuario" (una fila 'active' huérfana en remoto). El motor la
+ * usa para autorrecuperarse (descartar la huérfana y reintentar).
+ */
+export class ActiveSessionConflictError extends Error {
+  constructor(message = "conflicto: ya existe una sesión activa") {
+    super(message);
+    this.name = "ActiveSessionConflictError";
+  }
+}
+
 export interface EngineRemote {
   upsertSession(payload: SessionUpsertPayload): Promise<void>;
   upsertSets(payload: RemoteSet[]): Promise<void>;
+  /**
+   * Descarta las demás sesiones 'active' del usuario (todas menos keepSessionId).
+   * Se usa para liberar una fila 'active' huérfana antes de reintentar el insert.
+   */
+  discardOtherActiveSessions(
+    userId: string,
+    keepSessionId: string,
+  ): Promise<void>;
 }
 
 /** Mapea la sesión local al payload remoto. Función pura. */
@@ -85,7 +105,23 @@ export async function pushAll(
       continue;
     }
     if (sessionNeedsPush(session)) {
-      await remote.upsertSession(sessionToUpsert(session));
+      const payload = sessionToUpsert(session);
+      try {
+        await remote.upsertSession(payload);
+      } catch (err) {
+        // Autorrecuperación del conflicto "una activa por usuario": si el insert
+        // de una sesión 'active' choca con una huérfana en remoto, la descartamos
+        // y reintentamos UNA vez. Si vuelve a fallar, propaga.
+        if (
+          err instanceof ActiveSessionConflictError &&
+          payload.status === "active"
+        ) {
+          await remote.discardOtherActiveSessions(session.user_id, session.id);
+          await remote.upsertSession(payload);
+        } else {
+          throw err;
+        }
+      }
       await storage.markSessionPushed(session.id);
     }
     const dirtySets = await storage.getDirtySets(session.id);

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 
 import { createClient } from "@/lib/supabase/client";
 import type { PreviousSet } from "@/features/active-session/logic";
+import { rehydrateRemoteSession } from "@/features/active-session/rehydrate";
 import { useSessionStore } from "@/features/active-session/store";
 import { getSyncEngine } from "@/features/active-session/sync";
 
@@ -64,11 +65,52 @@ export function EntrenarClient({
   const resetMemory = useSessionStore((s) => s.resetMemory);
   const [finishing, setFinishing] = useState(false);
   const preselectHandled = useRef(false);
+  const rehydrateHandled = useRef(false);
+  // La preselección por slug debe esperar a que la rehidratación remota decida:
+  // si hay una sesión remota activa, gana ella y NO se auto-arranca un bloque.
+  const [rehydrateChecked, setRehydrateChecked] = useState(false);
 
-  // Hidrata la sesión activa local al montar (y arranca el sync pendiente).
+  // Al montar: hidrata la sesión local (y arranca el sync pendiente). Si no hay
+  // sesión local, intenta rehidratar una que solo exista en remoto (el usuario
+  // perdió el IndexedDB) para reabrir el formulario en vez del selector.
   useEffect(() => {
-    void hydrate();
-  }, [hydrate]);
+    let cancelled = false;
+    async function run() {
+      await hydrate();
+      if (cancelled) return;
+      // Solo una vez por montaje, y solo si no hay ya sesión en el store.
+      if (!rehydrateHandled.current && !useSessionStore.getState().session) {
+        rehydrateHandled.current = true;
+        try {
+          const rehydrated = await rehydrateRemoteSession({
+            supabase: createClient(),
+            userId: data.userId,
+            template: {
+              id: data.template.id,
+              plugin_key: data.template.plugin_key,
+            },
+            blocks: data.blocks,
+            exercises: data.exercises,
+          });
+          // Si rehidrató y el usuario no arrancó nada entretanto, abre el form.
+          if (
+            !cancelled &&
+            rehydrated &&
+            !useSessionStore.getState().session
+          ) {
+            await hydrate();
+          }
+        } catch {
+          // Sin red o error: silencio (el banner permite descartar).
+        }
+      }
+      if (!cancelled) setRehydrateChecked(true);
+    }
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrate, data.userId, data.template, data.blocks, data.exercises]);
 
   const exercisesByBlock = useMemo(() => {
     const map = new Map<string, EntrenarExercise[]>();
@@ -101,9 +143,12 @@ export function EntrenarClient({
   }
 
   // Preselección de bloque desde el Dashboard (?bloque=slug): solo si ya
-  // hidratamos y NO hay sesión activa; se aplica una única vez.
+  // hidratamos, resolvimos la rehidratación remota y NO hay sesión activa; se
+  // aplica una única vez. Esperar a `rehydrateChecked` evita competir con la
+  // rehidratación (una remota activa gana y no debe auto-arrancar bloque nuevo).
   useEffect(() => {
-    if (!hydrated || preselectHandled.current || !preselectSlug) return;
+    if (!hydrated || !rehydrateChecked || preselectHandled.current || !preselectSlug)
+      return;
     const current = useSessionStore.getState().session;
     if (current && current.status === "active") {
       preselectHandled.current = true;
@@ -117,7 +162,7 @@ export function EntrenarClient({
     preselectHandled.current = true;
     void handleSelectBlock(block);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hydrated, preselectSlug]);
+  }, [hydrated, rehydrateChecked, preselectSlug]);
 
   async function handleFinish() {
     const current = useSessionStore.getState().session;

@@ -33,6 +33,7 @@ export function InProgressBanner({
   const [pendingSync, setPendingSync] = useState(false);
   const [checked, setChecked] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [discardError, setDiscardError] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -112,18 +113,29 @@ export function InProgressBanner({
     if (!data || busy) return;
     if (!window.confirm("¿Descartar el entrenamiento en curso?")) return;
     setBusy(true);
+    setDiscardError(false);
     try {
       if (data.source === "local" && data.localSessionId) {
         await discardLocalSession(data.localSessionId);
       } else if (data.remoteSessionId) {
         const supabase = createClient();
-        await supabase
+        // Descarte remoto: si falla (sin red o error), NO ocultamos el banner
+        // para poder reintentar. `.eq("status","active")` lo hace idempotente.
+        const { error } = await supabase
           .from("workout_sessions")
           .update({ status: "discarded" })
-          .eq("id", data.remoteSessionId);
+          .eq("id", data.remoteSessionId)
+          .eq("status", "active");
+        if (error) {
+          setDiscardError(true);
+          return;
+        }
       }
       setData(null);
       router.refresh();
+    } catch {
+      // Fallo inesperado (p.ej. sin red): deja el banner para reintentar.
+      setDiscardError(true);
     } finally {
       setBusy(false);
     }
@@ -173,6 +185,11 @@ export function InProgressBanner({
           Descartar
         </button>
       </div>
+      {discardError && (
+        <p className="mt-2 text-xs text-red-300">
+          No se pudo descartar. Inténtalo de nuevo.
+        </p>
+      )}
     </div>
   );
 }
