@@ -3,7 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/supabase/database.types";
 import { getPlugin } from "@/plugins/registry";
 
-type Client = SupabaseClient<Database>;
+type Client = SupabaseClient<Database, "gymstats">;
 
 /** Plantilla resumida para la lista de /plantillas. */
 export type TemplateSummary = {
@@ -125,7 +125,7 @@ export type EditorTemplate = {
   name: string;
   plugin_key: string;
   pluginName: string;
-  config: Database["public"]["Tables"]["workout_templates"]["Row"]["config"];
+  config: Database["gymstats"]["Tables"]["workout_templates"]["Row"]["config"];
   created_by: string | null;
   blocks: EditorBlock[];
 };

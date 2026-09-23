@@ -10,10 +10,11 @@ import type { Database } from "./database.types";
 export async function createClient() {
   const cookieStore = await cookies();
 
-  return createServerClient<Database>(
+  return createServerClient<Database, "gymstats">(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      db: { schema: "gymstats" },
       cookies: {
         getAll() {
           return cookieStore.getAll();

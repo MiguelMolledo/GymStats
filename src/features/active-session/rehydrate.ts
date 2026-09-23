@@ -10,7 +10,7 @@ import type {
 
 import { getDB, type LocalSession, type LocalSet } from "./db";
 
-type Client = SupabaseClient<Database>;
+type Client = SupabaseClient<Database, "gymstats">;
 
 /** Datos necesarios para rehidratar una sesión que solo existe en remoto. */
 export type RehydrateInput = {

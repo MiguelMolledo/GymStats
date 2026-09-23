@@ -98,7 +98,8 @@ async function verifyAuthenticatedNavigation() {
 
   // Recogemos las cookies que @supabase/ssr generaría para la sesión de `test`.
   const jar = new Map<string, string>();
-  const supabase = createServerClient<Database>(URL, ANON, {
+  const supabase = createServerClient<Database, "gymstats">(URL, ANON, {
+    db: { schema: "gymstats" },
     cookies: {
       getAll() {
         return [...jar.entries()].map(([name, value]) => ({ name, value }));

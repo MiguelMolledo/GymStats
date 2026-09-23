@@ -4,11 +4,11 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
 
-type Client = SupabaseClient<Database>;
+type Client = SupabaseClient<Database, "gymstats">;
 
-type TemplateRow = Database["public"]["Tables"]["workout_templates"]["Row"];
-type BlockRow = Database["public"]["Tables"]["template_blocks"]["Row"];
-type ExerciseRow = Database["public"]["Tables"]["template_exercises"]["Row"];
+type TemplateRow = Database["gymstats"]["Tables"]["workout_templates"]["Row"];
+type BlockRow = Database["gymstats"]["Tables"]["template_blocks"]["Row"];
+type ExerciseRow = Database["gymstats"]["Tables"]["template_exercises"]["Row"];
 
 /**
  * Un set final de una sesión completada, con la info del ejercicio necesaria

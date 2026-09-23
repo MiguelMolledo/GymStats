@@ -1,6 +1,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
+import { createClient as createAdminClient } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { USERNAME_REGEX, usernameToEmail } from "@/lib/auth/constants";
 
@@ -66,36 +67,57 @@ export async function registro(
     };
   }
 
-  if (password.length < 6) {
-    return { error: "La contraseña debe tener al menos 6 caracteres." };
+  // Mínimo del proyecto de Supabase (compartido; lo fija su config de Auth).
+  if (password.length < 8) {
+    return { error: "La contraseña debe tener al menos 8 caracteres." };
   }
 
   if (inviteCode !== process.env.INVITE_CODE) {
     return { error: "El código de invitación no es válido." };
   }
 
-  const supabase = await createClient();
-  const { error } = await supabase.auth.signUp({
+  // El proyecto de Supabase se comparte con otras apps y tiene el registro
+  // público desactivado: el alta va con la service role y marcada con
+  // app_metadata.app = "gymstats" (el trigger de perfil de GymStats solo actúa
+  // sobre esos usuarios; las otras apps los ignoran).
+  const admin = createAdminClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false, autoRefreshToken: false } },
+  );
+  const { error } = await admin.auth.admin.createUser({
     email: usernameToEmail(username),
     password,
-    options: {
-      data: {
-        username,
-        display_name: displayName,
-      },
-    },
+    email_confirm: true,
+    // `app` en los dos: el trigger AFTER INSERT solo ve user_metadata
+    // (app_metadata lo escribe Auth en un UPDATE posterior).
+    app_metadata: { app: "gymstats" },
+    user_metadata: { app: "gymstats", username, display_name: displayName },
   });
 
   if (error) {
-    // El caso más común: username ya en uso (el trigger falla por unique).
+    // El caso más común: username ya en uso (email repetido, o el trigger
+    // falla por el unique de profiles.username → "Database error ...").
+    const msg = error.message.toLowerCase();
     if (
-      error.message.toLowerCase().includes("already") ||
-      error.message.toLowerCase().includes("duplicate") ||
-      error.message.toLowerCase().includes("registered")
+      error.code === "email_exists" ||
+      msg.includes("already") ||
+      msg.includes("duplicate") ||
+      msg.includes("registered") ||
+      msg.includes("database error")
     ) {
       return { error: "Ese usuario ya está en uso." };
     }
     return { error: "No se pudo crear la cuenta. Inténtalo de nuevo." };
+  }
+
+  const supabase = await createClient();
+  const { error: signInError } = await supabase.auth.signInWithPassword({
+    email: usernameToEmail(username),
+    password,
+  });
+  if (signInError) {
+    redirect("/login");
   }
 
   redirect("/");

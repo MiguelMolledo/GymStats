@@ -2,7 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/database.types";
 
-type Client = SupabaseClient<Database>;
+type Client = SupabaseClient<Database, "gymstats">;
 
 /** Bloque de una sesión, tal como se muestra en el historial. */
 export type HistorialBlock = {

@@ -101,7 +101,8 @@ async function main() {
     fail("Faltan NEXT_PUBLIC_SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY en .env.local");
   }
 
-  const supabase = createClient<DB>(url, serviceKey, {
+  const supabase = createClient<DB, "gymstats">(url, serviceKey, {
+    db: { schema: "gymstats" },
     auth: { persistSession: false, autoRefreshToken: false },
   });
 

@@ -13,7 +13,7 @@ import {
   type EngineStorage,
 } from "./engine-core";
 
-type Client = SupabaseClient<Database>;
+type Client = SupabaseClient<Database, "gymstats">;
 
 export type SyncStatus = "saved" | "saving" | "offline" | "error";
 

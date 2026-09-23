@@ -5,7 +5,7 @@ import type { Database } from "@/lib/supabase/database.types";
 import { parseBilboConfig, type BilboConfig } from "./config";
 import type { CoreSet1Row } from "./progression";
 
-type Client = SupabaseClient<Database>;
+type Client = SupabaseClient<Database, "gymstats">;
 
 /** Bloque (con su ejercicio core) tal como lo consume el Dashboard/Ciclos. */
 export type BilboBlock = {
@@ -153,7 +153,7 @@ async function loadBase(
 }
 
 function mapCycle(
-  c: Database["public"]["Tables"]["cycles"]["Row"],
+  c: Database["gymstats"]["Tables"]["cycles"]["Row"],
 ): BilboCycle {
   return {
     id: c.id,

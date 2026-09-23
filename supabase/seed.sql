@@ -13,7 +13,7 @@
 -- ---------------------------------------------------------------------------
 -- Template BILBO
 -- ---------------------------------------------------------------------------
-insert into public.workout_templates (id, name, plugin_key, config, created_by)
+insert into gymstats.workout_templates (id, name, plugin_key, config, created_by)
 values (
   '11111111-1111-4111-8111-111111111111',
   'BILBO',
@@ -26,7 +26,7 @@ on conflict (id) do nothing;
 -- ---------------------------------------------------------------------------
 -- Bloques (UUIDs deterministas para idempotencia y para referenciarlos abajo)
 -- ---------------------------------------------------------------------------
-insert into public.template_blocks (id, template_id, slug, label, emoji, accent_color, position)
+insert into gymstats.template_blocks (id, template_id, slug, label, emoji, accent_color, position)
 values
   ('11111111-1111-4111-8111-000000000001', '11111111-1111-4111-8111-111111111111', 'pecho',   'Pecho y Tríceps',  '⚡️', '#3b82f6', 1),
   ('11111111-1111-4111-8111-000000000002', '11111111-1111-4111-8111-111111111111', 'espalda', 'Espalda y Hombro', '🔥', '#d946ef', 2),
@@ -36,7 +36,7 @@ on conflict (id) do nothing;
 -- ---------------------------------------------------------------------------
 -- Ejercicios (UUID determinista por bloque+posición para idempotencia)
 -- ---------------------------------------------------------------------------
-insert into public.template_exercises (id, block_id, name, target_sets, is_core, position)
+insert into gymstats.template_exercises (id, block_id, name, target_sets, is_core, position)
 values
   -- pecho
   ('11111111-1111-4111-8111-100000000001', '11111111-1111-4111-8111-000000000001', 'Press de banca',  3, true,  1),

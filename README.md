@@ -98,32 +98,34 @@ npm run test           # tests con Vitest (lógica pura)
 
 ## Base de datos (Supabase)
 
-### Migraciones (`db push`)
+### Dónde vive la base de datos
 
-Las migraciones viven en `supabase/migrations/`. Para aplicarlas al proyecto remoto:
+Desde el 2026-09-23 GymStats no tiene proyecto de Supabase propio: sus tablas
+viven en el schema **`gymstats`** del proyecto compartido **DndMaster**
+(`neklxghwqtjinyufnhxh`, Frankfurt), junto a rolApp (`public`), FamilyExpenses
+(`family`) y modular-terrain-creator (`terrain`). Los clientes usan
+`db: { schema: "gymstats" }` y `auth.users` es compartido: las altas se hacen en
+el servidor con la service role y `app_metadata.app = "gymstats"` (el registro
+público del proyecto está desactivado y el trigger de perfil solo actúa sobre
+esos usuarios).
+
+> ⚠️ **Nunca `supabase db push` ni `supabase link` contra ese proyecto**: las
+> migraciones de `supabase/migrations/` son históricas (crean las tablas en
+> `public`) y chocarían con las de rolApp. Los cambios de esquema se aplican a
+> mano sobre `gymstats.*` con psql:
 
 ```bash
-# 1. Enlaza el proyecto (una vez). REF = vwfesurfvemlfkhmiiuq
-supabase link --project-ref <REF>
-
-# 2. Aplica las migraciones pendientes al remoto
-supabase db push
+psql "postgresql://postgres.neklxghwqtjinyufnhxh:<DB_PASSWORD_URLENCODED>@aws-0-eu-central-1.pooler.supabase.com:5432/postgres" \
+     -f cambio.sql
 ```
 
-En local con la CLI (`supabase start`), `supabase db reset` aplica migraciones **y** el seed.
+Tipos: `supabase gen types typescript --project-id neklxghwqtjinyufnhxh --schema gymstats > src/lib/supabase/database.types.ts`.
 
 ### Seed
 
 `supabase/seed.sql` crea la plantilla del **sistema BILBO** (bloques + ejercicios).
 Es idempotente (UUIDs fijos + `ON CONFLICT DO NOTHING`) y `created_by = NULL`
-(plantilla del sistema, protegida por RLS).
-
-`supabase db push` **no** ejecuta el seed contra el remoto. Para aplicarlo al remoto:
-
-```bash
-psql "postgresql://postgres.<REF>:<DB_PASSWORD_URLENCODED>@aws-0-eu-west-3.pooler.supabase.com:5432/postgres" \
-     -f supabase/seed.sql
-```
+(plantilla del sistema, protegida por RLS). Se aplica igual, con psql y `-f supabase/seed.sql`.
 
 ### Importación desde AiKit
 

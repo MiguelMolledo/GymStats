@@ -12,7 +12,7 @@ import {
   type LocalSet,
 } from "./logic";
 
-type Client = SupabaseClient<Database>;
+type Client = SupabaseClient<Database, "gymstats">;
 
 /**
  * Ejecuta plugin.onSessionCompleted para una sesión completada.

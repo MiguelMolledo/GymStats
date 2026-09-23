@@ -44,7 +44,7 @@ const TEST2 = "test2";
 const TEST2_PASS = "test1234";
 const DOMAIN = "gymstats.app";
 
-type Client = SupabaseClient<Database>;
+type Client = SupabaseClient<Database, "gymstats">;
 
 function assert(cond: unknown, msg: string) {
   if (!cond) {
@@ -80,13 +80,18 @@ async function loginTest(anon: Client, admin: Client): Promise<string> {
 }
 
 async function main() {
-  const admin = createClient<Database>(URL, SERVICE, {
+  const admin = createClient<Database, "gymstats">(URL, SERVICE, {
+    db: { schema: "gymstats" },
     auth: { persistSession: false },
   });
 
   // Cada usuario en su propio cliente (sesiones aisladas).
-  const anonTest = createClient<Database>(URL, ANON);
-  const anon2 = createClient<Database>(URL, ANON);
+  const anonTest = createClient<Database, "gymstats">(URL, ANON, {
+    db: { schema: "gymstats" },
+  });
+  const anon2 = createClient<Database, "gymstats">(URL, ANON, {
+    db: { schema: "gymstats" },
+  });
 
   // Estado a limpiar.
   let test2Id: string | null = null;

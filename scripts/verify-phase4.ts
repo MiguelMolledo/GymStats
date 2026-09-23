@@ -38,8 +38,11 @@ function assert(cond: unknown, msg: string) {
 }
 
 async function main() {
-  const anon = createClient<Database>(URL, ANON);
-  const admin = createClient<Database>(URL, SERVICE, {
+  const anon = createClient<Database, "gymstats">(URL, ANON, {
+    db: { schema: "gymstats" },
+  });
+  const admin = createClient<Database, "gymstats">(URL, SERVICE, {
+    db: { schema: "gymstats" },
     auth: { persistSession: false },
   });
 
